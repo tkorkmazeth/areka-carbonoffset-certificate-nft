@@ -7,10 +7,8 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 contract CarbonOffsetCertificate is ERC721, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
-    // tokenId => IPFS metadata URI (immutable after mint)
     mapping(uint256 => string) private _tokenURIs;
 
-    // Auto-incrementing token ID counter
     uint256 private _nextTokenId;
 
     event CertificateMinted(
@@ -65,7 +63,7 @@ contract CarbonOffsetCertificate is ERC721, AccessControl {
         return _tokenURIs[tokenId];
     }
 
-    // =========== Soulbound: block all transfers after mint ===========
+    // =========== Block all transfers after mint ===========
 
     function _update(
         address to,
@@ -73,7 +71,7 @@ contract CarbonOffsetCertificate is ERC721, AccessControl {
         address auth
     ) internal override returns (address) {
         address from = _ownerOf(tokenId);
-        // Allow minting (from == address(0)), block everything else
+
         if (from != address(0)) {
             revert("SOULBOUND: non-transferable");
         }
