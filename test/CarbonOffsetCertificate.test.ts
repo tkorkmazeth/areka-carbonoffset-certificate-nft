@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { ethers, upgrades } from "hardhat";
 import { CarbonOffsetCertificate } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
@@ -19,18 +19,26 @@ describe("CarbonOffsetCertificate", function () {
   beforeEach(async function () {
     [owner, minter, user1, user2, nonMinter] = await ethers.getSigners();
     const Factory = await ethers.getContractFactory("CarbonOffsetCertificate");
-    contract = await Factory.deploy();
-    await contract.waitForDeployment();
+    const deployed = await upgrades.deployProxy(
+      Factory,
+      [owner.address, owner.address],
+      {
+        initializer: "initialize",
+        kind: "uups",
+      },
+    );
+
+    await deployed.waitForDeployment();
+    contract = deployed as unknown as CarbonOffsetCertificate;
   });
 
-  // 1. Deployment
   describe("Deployment", function () {
-    it("should grant DEFAULT_ADMIN_ROLE to deployer", async function () {
+    it("should grant DEFAULT_ADMIN_ROLE to admin", async function () {
       expect(await contract.hasRole(DEFAULT_ADMIN_ROLE, owner.address)).to.be
         .true;
     });
 
-    it("should grant MINTER_ROLE to deployer", async function () {
+    it("should grant MINTER_ROLE to minter", async function () {
       expect(await contract.hasRole(MINTER_ROLE, owner.address)).to.be.true;
     });
 
@@ -38,13 +46,16 @@ describe("CarbonOffsetCertificate", function () {
       expect(await contract.name()).to.equal("Carbon Offset Certificate");
       expect(await contract.symbol()).to.equal("COC");
     });
+
+    it("initializer should not be callable twice", async function () {
+      await expect(contract.initialize(owner.address, owner.address)).to.be
+        .reverted;
+    });
   });
 
-  // 2. Minting
   describe("Minting", function () {
     it("should mint a token and return correct tokenId", async function () {
-      const tx = await contract.mint(user1.address, SAMPLE_URI);
-      const receipt = await tx.wait();
+      await contract.mint(user1.address, SAMPLE_URI);
       expect(await contract.ownerOf(1)).to.equal(user1.address);
     });
 
@@ -61,7 +72,6 @@ describe("CarbonOffsetCertificate", function () {
     });
   });
 
-  // 3. Access Control
   describe("Access Control", function () {
     it("should revert if non-minter tries to mint", async function () {
       await expect(contract.connect(nonMinter).mint(user1.address, SAMPLE_URI))
@@ -81,7 +91,6 @@ describe("CarbonOffsetCertificate", function () {
     });
   });
 
-  // 4. Soulbound
   describe("Soulbound (Non-Transferable)", function () {
     beforeEach(async function () {
       await contract.mint(user1.address, SAMPLE_URI);
@@ -127,38 +136,28 @@ describe("CarbonOffsetCertificate", function () {
     });
   });
 
-  // 5. Metadata Immutability
-  describe("Metadata Immutability", function () {
-    it("should not have any function to change tokenURI", async function () {
-      // Verify there's no setTokenURI or similar function in the ABI
-      const abi = contract.interface.fragments;
-      const setterFunctions = abi.filter(
-        (f) =>
-          f.type === "function" &&
-          (f.name.toLowerCase().includes("settokenuri") ||
-            f.name.toLowerCase().includes("seturi") ||
-            f.name.toLowerCase().includes("updateuri") ||
-            f.name.toLowerCase().includes("changuri")),
-      );
-      expect(setterFunctions.length).to.equal(0);
-    });
-
-    it("should preserve original URI after multiple mints", async function () {
+  describe("Metadata behaviour", function () {
+    it("should preserve original URI after multiple legacy mints", async function () {
       await contract.mint(user1.address, SAMPLE_URI);
       await contract.mint(user2.address, SAMPLE_URI_2);
       expect(await contract.tokenURI(1)).to.equal(SAMPLE_URI);
       expect(await contract.tokenURI(2)).to.equal(SAMPLE_URI_2);
     });
+
+    it("legacy token metadata cannot be changed via campaign setter", async function () {
+      await contract.mint(user1.address, SAMPLE_URI);
+      await expect(
+        contract.setCampaignMetadataUri(1, SAMPLE_URI_2),
+      ).to.be.revertedWith("Token is finalized, metadata frozen");
+    });
   });
 
-  // 6. Batch Mint
   describe("Batch Mint", function () {
     it("should mint multiple tokens in a batch", async function () {
       const recipients = [user1.address, user2.address, user1.address];
       const uris = [SAMPLE_URI, SAMPLE_URI_2, "ipfs://QmThird/metadata.json"];
 
-      const tx = await contract.batchMint(recipients, uris);
-      await tx.wait();
+      await contract.batchMint(recipients, uris);
 
       expect(await contract.ownerOf(1)).to.equal(user1.address);
       expect(await contract.ownerOf(2)).to.equal(user2.address);
@@ -171,7 +170,6 @@ describe("CarbonOffsetCertificate", function () {
     });
 
     it("should return correct tokenIds from batchMint", async function () {
-      // First mint a single token to offset IDs
       await contract.mint(user1.address, SAMPLE_URI);
 
       const recipients = [user2.address, user2.address];
@@ -189,7 +187,6 @@ describe("CarbonOffsetCertificate", function () {
     });
   });
 
-  // 7. Batch Mint Limit
   describe("Batch Mint Limit", function () {
     it("should revert if batch size exceeds 50", async function () {
       const recipients = Array(51).fill(user1.address);
@@ -202,13 +199,11 @@ describe("CarbonOffsetCertificate", function () {
     it("should succeed with exactly 50 items", async function () {
       const recipients = Array(50).fill(user1.address);
       const uris = Array(50).fill(SAMPLE_URI);
-      const tx = await contract.batchMint(recipients, uris);
-      await tx.wait();
+      await contract.batchMint(recipients, uris);
       expect(await contract.ownerOf(50)).to.equal(user1.address);
     });
   });
 
-  // 8. Event Emission
   describe("Event Emission", function () {
     it("should emit CertificateMinted on mint", async function () {
       await expect(contract.mint(user1.address, SAMPLE_URI))
@@ -230,7 +225,6 @@ describe("CarbonOffsetCertificate", function () {
     });
   });
 
-  // 9. Role Management
   describe("Role Management", function () {
     it("should allow admin to grant MINTER_ROLE", async function () {
       await contract.grantRole(MINTER_ROLE, minter.address);
@@ -257,14 +251,12 @@ describe("CarbonOffsetCertificate", function () {
     });
   });
 
-  // tokenURI edge case
   describe("tokenURI Edge Cases", function () {
     it("should revert for non-existent token", async function () {
       await expect(contract.tokenURI(999)).to.be.reverted;
     });
   });
 
-  // supportsInterface
   describe("supportsInterface", function () {
     it("should support ERC721 interface", async function () {
       expect(await contract.supportsInterface("0x80ac58cd")).to.be.true;
@@ -272,6 +264,190 @@ describe("CarbonOffsetCertificate", function () {
 
     it("should support AccessControl interface", async function () {
       expect(await contract.supportsInterface("0x7965db0b")).to.be.true;
+    });
+  });
+
+  describe("Event-campaign lifecycle (Stage 1 ↔ Stage 2)", function () {
+    const VAULT_URI = "ipfs://QmVaultPlaceholder1/metadata.json";
+    const VAULT_URI_2 = "ipfs://QmVaultPlaceholder2/metadata.json";
+    const FINAL_URI = "ipfs://QmFinalUserMetadata/metadata.json";
+
+    describe("batchMintCampaign", function () {
+      it("mints N tokens to vault, all marked Stage 1", async function () {
+        const uris = [VAULT_URI, VAULT_URI_2];
+        await contract.batchMintCampaign(owner.address, uris);
+        expect(await contract.ownerOf(1)).to.equal(owner.address);
+        expect(await contract.ownerOf(2)).to.equal(owner.address);
+        expect(await contract.isCampaignToken(1)).to.be.true;
+        expect(await contract.isCampaignToken(2)).to.be.true;
+        expect(await contract.tokenURI(1)).to.equal(VAULT_URI);
+      });
+
+      it("emits CampaignTokensMinted with correct range", async function () {
+        await expect(
+          contract.batchMintCampaign(owner.address, [VAULT_URI, VAULT_URI_2]),
+        )
+          .to.emit(contract, "CampaignTokensMinted")
+          .withArgs(1, 2, owner.address, 2);
+      });
+
+      it("reverts on zero vault address", async function () {
+        await expect(
+          contract.batchMintCampaign(ethers.ZeroAddress, [VAULT_URI]),
+        ).to.be.revertedWith("Invalid vault");
+      });
+
+      it("reverts when batch is empty", async function () {
+        await expect(
+          contract.batchMintCampaign(owner.address, []),
+        ).to.be.revertedWith("Invalid batch size");
+      });
+
+      it("reverts when batch exceeds 50", async function () {
+        const uris = Array(51).fill(VAULT_URI);
+        await expect(
+          contract.batchMintCampaign(owner.address, uris),
+        ).to.be.revertedWith("Invalid batch size");
+      });
+
+      it("[I2] reverts when caller is not MINTER_ROLE", async function () {
+        await expect(
+          contract
+            .connect(nonMinter)
+            .batchMintCampaign(owner.address, [VAULT_URI]),
+        ).to.be.reverted;
+      });
+    });
+
+    describe("reassign (Stage 1 -> Stage 2)", function () {
+      beforeEach(async function () {
+        await contract.batchMintCampaign(owner.address, [VAULT_URI]);
+      });
+
+      it("transfers from vault to user, updates metadata, clears flag (I6 atomicity)", async function () {
+        await contract.reassign(1, user1.address, FINAL_URI);
+        expect(await contract.ownerOf(1)).to.equal(user1.address);
+        expect(await contract.tokenURI(1)).to.equal(FINAL_URI);
+        expect(await contract.isCampaignToken(1)).to.be.false;
+      });
+
+      it("emits CertificateReassigned with correct args", async function () {
+        await expect(contract.reassign(1, user1.address, FINAL_URI))
+          .to.emit(contract, "CertificateReassigned")
+          .withArgs(1, owner.address, user1.address, FINAL_URI);
+      });
+
+      it("[I2] reverts when caller is not MINTER_ROLE", async function () {
+        await expect(
+          contract.connect(nonMinter).reassign(1, user1.address, FINAL_URI),
+        ).to.be.reverted;
+      });
+
+      it("[I3] reverts on second reassign of the same token", async function () {
+        await contract.reassign(1, user1.address, FINAL_URI);
+        await expect(
+          contract.reassign(1, user2.address, FINAL_URI),
+        ).to.be.revertedWith("Not a campaign token");
+      });
+
+      it("[I3] reverts on a legacy mint token", async function () {
+        await contract.mint(user1.address, FINAL_URI);
+        await expect(
+          contract.reassign(2, user2.address, FINAL_URI),
+        ).to.be.revertedWith("Not a campaign token");
+      });
+
+      it("reverts on zero new owner", async function () {
+        await expect(
+          contract.reassign(1, ethers.ZeroAddress, FINAL_URI),
+        ).to.be.revertedWith("Invalid recipient");
+      });
+    });
+
+    describe("setCampaignMetadataUri (I1 - metadata mutability)", function () {
+      beforeEach(async function () {
+        await contract.batchMintCampaign(owner.address, [VAULT_URI]);
+      });
+
+      it("[I1] succeeds for vault-held campaign token", async function () {
+        await contract.setCampaignMetadataUri(1, VAULT_URI_2);
+        expect(await contract.tokenURI(1)).to.equal(VAULT_URI_2);
+      });
+
+      it("[I1] reverts on finalized token", async function () {
+        await contract.reassign(1, user1.address, FINAL_URI);
+        await expect(
+          contract.setCampaignMetadataUri(1, "ipfs://QmEvil/"),
+        ).to.be.revertedWith("Token is finalized, metadata frozen");
+      });
+
+      it("[I1] reverts on legacy mint token", async function () {
+        await contract.mint(user1.address, FINAL_URI);
+        await expect(
+          contract.setCampaignMetadataUri(2, VAULT_URI_2),
+        ).to.be.revertedWith("Token is finalized, metadata frozen");
+      });
+
+      it("[I2] reverts when caller is not MINTER_ROLE", async function () {
+        await expect(
+          contract.connect(nonMinter).setCampaignMetadataUri(1, VAULT_URI_2),
+        ).to.be.reverted;
+      });
+    });
+
+    describe("Soulbound enforcement after Stage 2 (I4)", function () {
+      beforeEach(async function () {
+        await contract.batchMintCampaign(owner.address, [VAULT_URI]);
+        await contract.reassign(1, user1.address, FINAL_URI);
+      });
+
+      it("[I4] transferFrom reverts after finalize", async function () {
+        await expect(
+          contract.connect(user1).transferFrom(user1.address, user2.address, 1),
+        ).to.be.revertedWith("SOULBOUND: non-transferable");
+      });
+
+      it("[I4] safeTransferFrom reverts after finalize", async function () {
+        await expect(
+          contract
+            .connect(user1)
+            ["safeTransferFrom(address,address,uint256)"](
+              user1.address,
+              user2.address,
+              1,
+            ),
+        ).to.be.revertedWith("SOULBOUND: non-transferable");
+      });
+
+      it("[I4] approve reverts after finalize", async function () {
+        await expect(
+          contract.connect(user1).approve(user2.address, 1),
+        ).to.be.revertedWith("SOULBOUND: approvals disabled");
+      });
+    });
+
+    describe("Vault custody invariants (I4 - vault cannot self-transfer)", function () {
+      it("[I4] vault owner cannot transfer Stage-1 token via transferFrom", async function () {
+        await contract.batchMintCampaign(owner.address, [VAULT_URI]);
+        await expect(contract.transferFrom(owner.address, user1.address, 1)).to
+          .be.reverted;
+      });
+    });
+
+    describe("Legacy mint paths remain soulbound (regression)", function () {
+      it("mint() then transferFrom still reverts", async function () {
+        await contract.mint(user1.address, FINAL_URI);
+        await expect(
+          contract.connect(user1).transferFrom(user1.address, user2.address, 1),
+        ).to.be.revertedWith("SOULBOUND: non-transferable");
+      });
+
+      it("batchMint() then transferFrom still reverts", async function () {
+        await contract.batchMint([user1.address], [FINAL_URI]);
+        await expect(
+          contract.connect(user1).transferFrom(user1.address, user2.address, 1),
+        ).to.be.revertedWith("SOULBOUND: non-transferable");
+      });
     });
   });
 });
